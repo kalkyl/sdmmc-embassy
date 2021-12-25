@@ -145,15 +145,15 @@ where
     }
 
     /// Initializes the card into a known state
-    pub async fn acquire(&mut self) -> Result<&mut SdMmcSpi<SPI, CS>, Error> {
+    pub async fn acquire(self) -> Result<SdMmcSpi<SPI, CS>, Error> {
         self.acquire_with_opts(Default::default()).await
     }
 
     /// Initializes the card into a known state
     pub async fn acquire_with_opts(
-        &mut self,
+        mut self,
         options: AcquireOpts,
-    ) -> Result<&mut SdMmcSpi<SPI, CS>, Error> {
+    ) -> Result<SdMmcSpi<SPI, CS>, Error> {
         // Assume it hasn't worked
         self.state = State::Error;
         // Supply minimum of 74 clock cycles without CS asserted.
