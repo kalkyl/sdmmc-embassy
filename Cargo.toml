@@ -1,0 +1,16 @@
+[package]
+name = "sdmmc-embassy"
+version = "0.1.0"
+authors = ["Henrik Alsér <henrik.alser@me.com>"]
+edition = "2018"
+readme = "README.md"
+
+[dependencies]
+embedded-hal = "0.2.3"
+byteorder = { version = "1", default-features = false }
+log = "0.4"
+embassy-traits = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy" }
+
+[dev-dependencies]
+hex-literal = "0.3"
+env_logger = "0.8"
