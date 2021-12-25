@@ -447,8 +447,9 @@ impl<'a> OnDiskDirEntry<'a> {
 
 impl FatVolume {
     /// Write a new entry in the FAT
-    pub async fn update_info_sector<T, SPI, CS>(
+    pub async fn update_info_sector<T, SPI, CS, D>(
         &mut self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
     ) -> Result<(), Error<sdmmc::Error>>
     where
@@ -456,6 +457,7 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         match &self.fat_specific_info {
             FatSpecificInfo::Fat16(_) => {}
@@ -466,7 +468,12 @@ impl FatVolume {
                 let mut blocks = [Block::new()];
                 controller
                     .block_device
-                    .read(&mut blocks, fat32_info.info_location, "read_info_sector")
+                    .read(
+                        delay,
+                        &mut blocks,
+                        fat32_info.info_location,
+                        "read_info_sector",
+                    )
                     .await
                     .map_err(Error::DeviceError)?;
                 let block = &mut blocks[0];
@@ -478,7 +485,7 @@ impl FatVolume {
                 }
                 controller
                     .block_device
-                    .write(&blocks, fat32_info.info_location)
+                    .write(delay, &blocks, fat32_info.info_location)
                     .await
                     .map_err(Error::DeviceError)?;
             }
@@ -495,8 +502,9 @@ impl FatVolume {
     }
 
     /// Write a new entry in the FAT
-    async fn update_fat<T, SPI, CS>(
+    async fn update_fat<T, SPI, CS, D>(
         &mut self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
         cluster: Cluster,
         new_value: Cluster,
@@ -506,6 +514,7 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         let mut blocks = [Block::new()];
         let this_fat_block_num;
@@ -516,7 +525,7 @@ impl FatVolume {
                 let this_fat_ent_offset = (fat_offset % Block::LEN_U32) as usize;
                 controller
                     .block_device
-                    .read(&mut blocks, this_fat_block_num, "read_fat")
+                    .read(delay, &mut blocks, this_fat_block_num, "read_fat")
                     .await
                     .map_err(Error::DeviceError)?;
                 let entry = match new_value {
@@ -538,7 +547,7 @@ impl FatVolume {
                 let this_fat_ent_offset = (fat_offset % Block::LEN_U32) as usize;
                 controller
                     .block_device
-                    .read(&mut blocks, this_fat_block_num, "read_fat")
+                    .read(delay, &mut blocks, this_fat_block_num, "read_fat")
                     .await
                     .map_err(Error::DeviceError)?;
                 let entry = match new_value {
@@ -559,15 +568,16 @@ impl FatVolume {
         }
         controller
             .block_device
-            .write(&blocks, this_fat_block_num)
+            .write(delay, &blocks, this_fat_block_num)
             .await
             .map_err(Error::DeviceError)?;
         Ok(())
     }
 
     /// Look in the FAT to see which cluster comes next.
-    pub(crate) async fn next_cluster<T, SPI, CS>(
+    pub(crate) async fn next_cluster<T, SPI, CS, D>(
         &self,
+        delay: &mut D,
         controller: &Controller<T, SPI, CS>,
         cluster: Cluster,
     ) -> Result<Cluster, Error<sdmmc::Error>>
@@ -576,6 +586,7 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         let mut blocks = [Block::new()];
         match &self.fat_specific_info {
@@ -585,7 +596,7 @@ impl FatVolume {
                 let this_fat_ent_offset = (fat_offset % Block::LEN_U32) as usize;
                 controller
                     .block_device
-                    .read(&mut blocks, this_fat_block_num, "next_cluster")
+                    .read(delay, &mut blocks, this_fat_block_num, "next_cluster")
                     .await
                     .map_err(Error::DeviceError)?;
                 let fat_entry = LittleEndian::read_u16(
@@ -612,7 +623,7 @@ impl FatVolume {
                 let this_fat_ent_offset = (fat_offset % Block::LEN_U32) as usize;
                 controller
                     .block_device
-                    .read(&mut blocks, this_fat_block_num, "next_cluster")
+                    .read(delay, &mut blocks, this_fat_block_num, "next_cluster")
                     .await
                     .map_err(Error::DeviceError)?;
                 let fat_entry = LittleEndian::read_u32(
@@ -677,8 +688,9 @@ impl FatVolume {
 
     /// Finds a empty entry space and writes the new entry to it, allocates a new cluster if it's
     /// needed
-    pub(crate) async fn write_new_directory_entry<T, SPI, CS>(
+    pub(crate) async fn write_new_directory_entry<T, SPI, CS, D>(
         &mut self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
         dir: &Directory,
         name: ShortFileName,
@@ -689,6 +701,7 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         match &self.fat_specific_info {
             FatSpecificInfo::Fat16(fat16_info) => {
@@ -710,7 +723,7 @@ impl FatVolume {
                     for block in first_dir_block_num.range(dir_size) {
                         controller
                             .block_device
-                            .read(&mut blocks, block, "read_dir")
+                            .read(delay, &mut blocks, block, "read_dir")
                             .await
                             .map_err(Error::DeviceError)?;
                         for entry in 0..Block::LEN / OnDiskDirEntry::LEN {
@@ -732,7 +745,7 @@ impl FatVolume {
                                     .copy_from_slice(&entry.serialize(FatType::Fat16)[..]);
                                 controller
                                     .block_device
-                                    .write(&blocks, block)
+                                    .write(delay, &blocks, block)
                                     .await
                                     .map_err(Error::DeviceError)?;
                                 return Ok(entry);
@@ -740,13 +753,16 @@ impl FatVolume {
                         }
                     }
                     if cluster != Cluster::ROOT_DIR {
-                        current_cluster = match self.next_cluster(controller, cluster).await {
+                        current_cluster = match self.next_cluster(delay, controller, cluster).await
+                        {
                             Ok(n) => {
                                 first_dir_block_num = self.cluster_to_block(n);
                                 Some(n)
                             }
                             Err(Error::EndOfFile) => {
-                                let c = self.alloc_cluster(controller, Some(cluster), true).await?;
+                                let c = self
+                                    .alloc_cluster(delay, controller, Some(cluster), true)
+                                    .await?;
                                 first_dir_block_num = self.cluster_to_block(c);
                                 Some(c)
                             }
@@ -771,7 +787,7 @@ impl FatVolume {
                     for block in first_dir_block_num.range(dir_size) {
                         controller
                             .block_device
-                            .read(&mut blocks, block, "read_dir")
+                            .read(delay, &mut blocks, block, "read_dir")
                             .await
                             .map_err(Error::DeviceError)?;
                         for entry in 0..Block::LEN / OnDiskDirEntry::LEN {
@@ -793,20 +809,22 @@ impl FatVolume {
                                     .copy_from_slice(&entry.serialize(FatType::Fat32)[..]);
                                 controller
                                     .block_device
-                                    .write(&blocks, block)
+                                    .write(delay, &blocks, block)
                                     .await
                                     .map_err(Error::DeviceError)?;
                                 return Ok(entry);
                             }
                         }
                     }
-                    current_cluster = match self.next_cluster(controller, cluster).await {
+                    current_cluster = match self.next_cluster(delay, controller, cluster).await {
                         Ok(n) => {
                             first_dir_block_num = self.cluster_to_block(n);
                             Some(n)
                         }
                         Err(Error::EndOfFile) => {
-                            let c = self.alloc_cluster(controller, Some(cluster), true).await?;
+                            let c = self
+                                .alloc_cluster(delay, controller, Some(cluster), true)
+                                .await?;
                             first_dir_block_num = self.cluster_to_block(c);
                             Some(c)
                         }
@@ -820,8 +838,9 @@ impl FatVolume {
 
     /// Calls callback `func` with every valid entry in the given directory.
     /// Useful for performing directory listings.
-    pub(crate) async fn iterate_dir<T, F, SPI, CS>(
+    pub(crate) async fn iterate_dir<T, F, SPI, CS, D>(
         &self,
+        delay: &mut D,
         controller: &Controller<T, SPI, CS>,
         dir: &Directory,
         mut func: F,
@@ -832,6 +851,7 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         match &self.fat_specific_info {
             FatSpecificInfo::Fat16(fat16_info) => {
@@ -852,7 +872,7 @@ impl FatVolume {
                     for block in first_dir_block_num.range(dir_size) {
                         controller
                             .block_device
-                            .read(&mut blocks, block, "read_dir")
+                            .read(delay, &mut blocks, block, "read_dir")
                             .await
                             .map_err(Error::DeviceError)?;
                         for entry in 0..Block::LEN / OnDiskDirEntry::LEN {
@@ -871,7 +891,8 @@ impl FatVolume {
                         }
                     }
                     if cluster != Cluster::ROOT_DIR {
-                        current_cluster = match self.next_cluster(controller, cluster).await {
+                        current_cluster = match self.next_cluster(delay, controller, cluster).await
+                        {
                             Ok(n) => {
                                 first_dir_block_num = self.cluster_to_block(n);
                                 Some(n)
@@ -895,7 +916,7 @@ impl FatVolume {
                     for block in block_idx.range(BlockCount(u32::from(self.blocks_per_cluster))) {
                         controller
                             .block_device
-                            .read(&mut blocks, block, "read_dir")
+                            .read(delay, &mut blocks, block, "read_dir")
                             .await
                             .map_err(Error::DeviceError)?;
                         for entry in 0..Block::LEN / OnDiskDirEntry::LEN {
@@ -913,7 +934,7 @@ impl FatVolume {
                             }
                         }
                     }
-                    current_cluster = match self.next_cluster(controller, cluster).await {
+                    current_cluster = match self.next_cluster(delay, controller, cluster).await {
                         Ok(n) => Some(n),
                         _ => None,
                     };
@@ -924,8 +945,9 @@ impl FatVolume {
     }
 
     /// Get an entry from the given directory
-    pub(crate) async fn find_directory_entry<T, SPI, CS>(
+    pub(crate) async fn find_directory_entry<T, SPI, CS, D>(
         &self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
         dir: &Directory,
         name: &str,
@@ -935,6 +957,7 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         let match_name = ShortFileName::create_from_str(name).map_err(Error::FilenameError)?;
         match &self.fat_specific_info {
@@ -955,7 +978,13 @@ impl FatVolume {
                 while let Some(cluster) = current_cluster {
                     for block in first_dir_block_num.range(dir_size) {
                         match self
-                            .find_entry_in_block(controller, FatType::Fat16, &match_name, block)
+                            .find_entry_in_block(
+                                delay,
+                                controller,
+                                FatType::Fat16,
+                                &match_name,
+                                block,
+                            )
                             .await
                         {
                             Err(Error::NotInBlock) => continue,
@@ -963,7 +992,8 @@ impl FatVolume {
                         }
                     }
                     if cluster != Cluster::ROOT_DIR {
-                        current_cluster = match self.next_cluster(controller, cluster).await {
+                        current_cluster = match self.next_cluster(delay, controller, cluster).await
+                        {
                             Ok(n) => {
                                 first_dir_block_num = self.cluster_to_block(n);
                                 Some(n)
@@ -985,14 +1015,20 @@ impl FatVolume {
                     let block_idx = self.cluster_to_block(cluster);
                     for block in block_idx.range(BlockCount(u32::from(self.blocks_per_cluster))) {
                         match self
-                            .find_entry_in_block(controller, FatType::Fat32, &match_name, block)
+                            .find_entry_in_block(
+                                delay,
+                                controller,
+                                FatType::Fat32,
+                                &match_name,
+                                block,
+                            )
                             .await
                         {
                             Err(Error::NotInBlock) => continue,
                             x => return x,
                         }
                     }
-                    current_cluster = match self.next_cluster(controller, cluster).await {
+                    current_cluster = match self.next_cluster(delay, controller, cluster).await {
                         Ok(n) => Some(n),
                         _ => None,
                     }
@@ -1003,8 +1039,9 @@ impl FatVolume {
     }
 
     /// Finds an entry in a given block
-    async fn find_entry_in_block<T, SPI, CS>(
+    async fn find_entry_in_block<T, SPI, CS, D>(
         &self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
         fat_type: FatType,
         match_name: &ShortFileName,
@@ -1015,11 +1052,12 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         let mut blocks = [Block::new()];
         controller
             .block_device
-            .read(&mut blocks, block, "read_dir")
+            .read(delay, &mut blocks, block, "read_dir")
             .await
             .map_err(Error::DeviceError)?;
         for entry in 0..Block::LEN / OnDiskDirEntry::LEN {
@@ -1040,8 +1078,9 @@ impl FatVolume {
     }
 
     /// Delete an entry from the given directory
-    pub(crate) async fn delete_directory_entry<T, SPI, CS>(
+    pub(crate) async fn delete_directory_entry<T, SPI, CS, D>(
         &self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
         dir: &Directory,
         name: &str,
@@ -1051,6 +1090,7 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         let match_name = ShortFileName::create_from_str(name).map_err(Error::FilenameError)?;
         match &self.fat_specific_info {
@@ -1071,7 +1111,7 @@ impl FatVolume {
                 while let Some(cluster) = current_cluster {
                     for block in first_dir_block_num.range(dir_size) {
                         match self
-                            .delete_entry_in_block(controller, &match_name, block)
+                            .delete_entry_in_block(delay, controller, &match_name, block)
                             .await
                         {
                             Err(Error::NotInBlock) => continue,
@@ -1079,7 +1119,8 @@ impl FatVolume {
                         }
                     }
                     if cluster != Cluster::ROOT_DIR {
-                        current_cluster = match self.next_cluster(controller, cluster).await {
+                        current_cluster = match self.next_cluster(delay, controller, cluster).await
+                        {
                             Ok(n) => {
                                 first_dir_block_num = self.cluster_to_block(n);
                                 Some(n)
@@ -1101,14 +1142,14 @@ impl FatVolume {
                     let block_idx = self.cluster_to_block(cluster);
                     for block in block_idx.range(BlockCount(u32::from(self.blocks_per_cluster))) {
                         match self
-                            .delete_entry_in_block(controller, &match_name, block)
+                            .delete_entry_in_block(delay, controller, &match_name, block)
                             .await
                         {
                             Err(Error::NotInBlock) => continue,
                             x => return x,
                         }
                     }
-                    current_cluster = match self.next_cluster(controller, cluster).await {
+                    current_cluster = match self.next_cluster(delay, controller, cluster).await {
                         Ok(n) => Some(n),
                         _ => None,
                     }
@@ -1119,8 +1160,9 @@ impl FatVolume {
     }
 
     /// Deletes an entry in a given block
-    async fn delete_entry_in_block<T, SPI, CS>(
+    async fn delete_entry_in_block<T, SPI, CS, D>(
         &self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
         match_name: &ShortFileName,
         block: BlockIdx,
@@ -1130,11 +1172,12 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         let mut blocks = [Block::new()];
         controller
             .block_device
-            .read(&mut blocks, block, "read_dir")
+            .read(delay, &mut blocks, block, "read_dir")
             .await
             .map_err(Error::DeviceError)?;
         for entry in 0..Block::LEN / OnDiskDirEntry::LEN {
@@ -1149,7 +1192,7 @@ impl FatVolume {
                 blocks[0].contents[start] = 0xE5;
                 controller
                     .block_device
-                    .write(&blocks, block)
+                    .write(delay, &blocks, block)
                     .await
                     .map_err(Error::DeviceError)?;
                 return Ok(());
@@ -1159,8 +1202,9 @@ impl FatVolume {
     }
 
     /// Finds the next free cluster after the start_cluster and before end_cluster
-    pub(crate) async fn find_next_free_cluster<T, SPI, CS>(
+    pub(crate) async fn find_next_free_cluster<T, SPI, CS, D>(
         &self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
         start_cluster: Cluster,
         end_cluster: Cluster,
@@ -1170,6 +1214,7 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         let mut blocks = [Block::new()];
         let mut current_cluster = start_cluster;
@@ -1191,7 +1236,7 @@ impl FatVolume {
                     trace!("Reading block {:?}", this_fat_block_num);
                     controller
                         .block_device
-                        .read(&mut blocks, this_fat_block_num, "next_cluster")
+                        .read(delay, &mut blocks, this_fat_block_num, "next_cluster")
                         .await
                         .map_err(Error::DeviceError)?;
 
@@ -1224,7 +1269,7 @@ impl FatVolume {
                     trace!("Reading block {:?}", this_fat_block_num);
                     controller
                         .block_device
-                        .read(&mut blocks, this_fat_block_num, "next_cluster")
+                        .read(delay, &mut blocks, this_fat_block_num, "next_cluster")
                         .await
                         .map_err(Error::DeviceError)?;
 
@@ -1246,8 +1291,9 @@ impl FatVolume {
     }
 
     /// Tries to allocate a cluster
-    pub(crate) async fn alloc_cluster<T, SPI, CS>(
+    pub(crate) async fn alloc_cluster<T, SPI, CS, D>(
         &mut self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
         prev_cluster: Option<Cluster>,
         zero: bool,
@@ -1257,6 +1303,7 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         debug!("Allocating new cluster, prev_cluster={:?}", prev_cluster);
         let end_cluster = Cluster(self.cluster_count + RESERVED_ENTRIES);
@@ -1270,7 +1317,7 @@ impl FatVolume {
             end_cluster
         );
         let new_cluster = match self
-            .find_next_free_cluster(controller, start_cluster, end_cluster)
+            .find_next_free_cluster(delay, controller, start_cluster, end_cluster)
             .await
         {
             Ok(cluster) => cluster,
@@ -1280,12 +1327,17 @@ impl FatVolume {
                     Cluster(RESERVED_ENTRIES),
                     end_cluster
                 );
-                self.find_next_free_cluster(controller, Cluster(RESERVED_ENTRIES), end_cluster)
-                    .await?
+                self.find_next_free_cluster(
+                    delay,
+                    controller,
+                    Cluster(RESERVED_ENTRIES),
+                    end_cluster,
+                )
+                .await?
             }
             Err(e) => return Err(e),
         };
-        self.update_fat(controller, new_cluster, Cluster::END_OF_FILE)
+        self.update_fat(delay, controller, new_cluster, Cluster::END_OF_FILE)
             .await?;
         if let Some(cluster) = prev_cluster {
             trace!(
@@ -1293,7 +1345,8 @@ impl FatVolume {
                 cluster,
                 new_cluster
             );
-            self.update_fat(controller, cluster, new_cluster).await?;
+            self.update_fat(delay, controller, cluster, new_cluster)
+                .await?;
         }
         trace!(
             "Finding next free between {:?}..={:?}",
@@ -1301,13 +1354,18 @@ impl FatVolume {
             end_cluster
         );
         self.next_free_cluster = match self
-            .find_next_free_cluster(controller, new_cluster, end_cluster)
+            .find_next_free_cluster(delay, controller, new_cluster, end_cluster)
             .await
         {
             Ok(cluster) => Some(cluster),
             Err(_) if new_cluster.0 > RESERVED_ENTRIES => {
                 match self
-                    .find_next_free_cluster(controller, Cluster(RESERVED_ENTRIES), end_cluster)
+                    .find_next_free_cluster(
+                        delay,
+                        controller,
+                        Cluster(RESERVED_ENTRIES),
+                        end_cluster,
+                    )
                     .await
                 {
                     Ok(cluster) => Some(cluster),
@@ -1327,7 +1385,7 @@ impl FatVolume {
             for block in first_block.range(num_blocks) {
                 controller
                     .block_device
-                    .write(&blocks, block)
+                    .write(delay, &blocks, block)
                     .await
                     .map_err(Error::DeviceError)?;
             }
@@ -1337,8 +1395,9 @@ impl FatVolume {
     }
 
     /// Marks the input cluster as an EOF and all the subsequent clusters in the chain as free
-    pub(crate) async fn truncate_cluster_chain<T, SPI, CS>(
+    pub(crate) async fn truncate_cluster_chain<T, SPI, CS, D>(
         &mut self,
+        delay: &mut D,
         controller: &mut Controller<T, SPI, CS>,
         cluster: Cluster,
     ) -> Result<(), Error<sdmmc::Error>>
@@ -1347,12 +1406,13 @@ impl FatVolume {
         SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
         CS: 'static + embedded_hal::digital::v2::OutputPin,
         <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+        D: embassy_traits::delay::Delay,
     {
         if cluster.0 < RESERVED_ENTRIES {
             // file doesn't have any valid cluster allocated, there is nothing to do
             return Ok(());
         }
-        let mut next = match self.next_cluster(controller, cluster).await {
+        let mut next = match self.next_cluster(delay, controller, cluster).await {
             Ok(n) => n,
             Err(Error::EndOfFile) => return Ok(()),
             Err(e) => return Err(e),
@@ -1364,16 +1424,18 @@ impl FatVolume {
         } else {
             self.next_free_cluster = Some(next);
         }
-        self.update_fat(controller, cluster, Cluster::END_OF_FILE)
+        self.update_fat(delay, controller, cluster, Cluster::END_OF_FILE)
             .await?;
         loop {
-            match self.next_cluster(controller, next).await {
+            match self.next_cluster(delay, controller, next).await {
                 Ok(n) => {
-                    self.update_fat(controller, next, Cluster::EMPTY).await?;
+                    self.update_fat(delay, controller, next, Cluster::EMPTY)
+                        .await?;
                     next = n;
                 }
                 Err(Error::EndOfFile) => {
-                    self.update_fat(controller, next, Cluster::EMPTY).await?;
+                    self.update_fat(delay, controller, next, Cluster::EMPTY)
+                        .await?;
                     break;
                 }
                 Err(e) => return Err(e),
@@ -1388,7 +1450,8 @@ impl FatVolume {
 
 /// Load the boot parameter block from the start of the given partition and
 /// determine if the partition contains a valid FAT16 or FAT32 file system.
-pub async fn parse_volume<T, SPI, CS>(
+pub async fn parse_volume<T, SPI, CS, D>(
+    delay: &mut D,
     controller: &mut Controller<T, SPI, CS>,
     lba_start: BlockIdx,
     num_blocks: BlockCount,
@@ -1398,11 +1461,12 @@ where
     SPI: 'static + embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
     CS: 'static + embedded_hal::digital::v2::OutputPin,
     <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+    D: embassy_traits::delay::Delay,
 {
     let mut blocks = [Block::new()];
     controller
         .block_device
-        .read(&mut blocks, lba_start, "read_bpb")
+        .read(delay, &mut blocks, lba_start, "read_bpb")
         .await
         .map_err(Error::DeviceError)?;
     let block = &blocks[0];
@@ -1449,6 +1513,7 @@ where
             controller
                 .block_device
                 .read(
+                    delay,
                     &mut info_blocks,
                     lba_start + info_location,
                     "read_info_sector",

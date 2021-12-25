@@ -86,22 +86,35 @@ enum CardType {
 struct Delay(u32);
 
 impl Delay {
-    fn new() -> Delay {
+    fn new() -> Self {
         Delay(DEFAULT_DELAY_COUNT)
     }
 
-    fn delay(&mut self, err: Error) -> Result<(), Error> {
+    async fn delay<D>(&mut self, delay: &mut D, micros: u64, err: Error) -> Result<(), Error>
+    where
+        D: embassy_traits::delay::Delay,
+    {
         if self.0 == 0 {
             Err(err)
         } else {
-            let dummy_var: u32 = 0;
-            for _ in 0..100 {
-                unsafe { core::ptr::read_volatile(&dummy_var) };
-            }
+            delay.delay_us(micros).await;
             self.0 -= 1;
             Ok(())
         }
     }
+
+    // fn delay(&mut self, err: Error) -> Result<(), Error> {
+    //     if self.0 == 0 {
+    //         Err(err)
+    //     } else {
+    //         let dummy_var: u32 = 0;
+    //         for _ in 0..100 {
+    //             unsafe { core::ptr::read_volatile(&dummy_var) };
+    //         }
+    //         self.0 -= 1;
+    //         Ok(())
+    //     }
+    // }
 }
 
 /// Options for acquiring the card.
@@ -145,15 +158,22 @@ where
     }
 
     /// Initializes the card into a known state
-    pub async fn acquire(self) -> Result<SdMmcSpi<SPI, CS>, Error> {
-        self.acquire_with_opts(Default::default()).await
+    pub async fn acquire<D>(self, delay: &mut D) -> Result<SdMmcSpi<SPI, CS>, Error>
+    where
+        D: embassy_traits::delay::Delay,
+    {
+        self.acquire_with_opts(delay, Default::default()).await
     }
 
     /// Initializes the card into a known state
-    pub async fn acquire_with_opts(
+    pub async fn acquire_with_opts<D>(
         mut self,
+        delay: &mut D,
         options: AcquireOpts,
-    ) -> Result<SdMmcSpi<SPI, CS>, Error> {
+    ) -> Result<SdMmcSpi<SPI, CS>, Error>
+    where
+        D: embassy_traits::delay::Delay,
+    {
         // Assume it hasn't worked
         self.state = State::Error;
         // Supply minimum of 74 clock cycles without CS asserted.
@@ -166,7 +186,7 @@ where
         // Enter SPI mode
         let mut attempts = 32;
         while attempts > 0 {
-            match self.card_command(CMD0, 0).await {
+            match self.card_command(delay, CMD0, 0).await {
                 Err(Error::TimeoutCommand(0)) => {
                     // Try again?
                     attempts -= 1;
@@ -186,13 +206,14 @@ where
             return Err(Error::CardNotFound);
         }
         // Enable CRC
-        if self.card_command(CMD59, 1).await? != R1_IDLE_STATE && options.require_crc {
+        if self.card_command(delay, CMD59, 1).await? != R1_IDLE_STATE && options.require_crc {
             return Err(Error::CantEnableCRC);
         }
         // Check card version
-        let mut delay = Delay::new();
+        let mut timeout = Delay::new();
         loop {
-            if self.card_command(CMD8, 0x1AA).await? == (R1_ILLEGAL_COMMAND | R1_IDLE_STATE) {
+            if self.card_command(delay, CMD8, 0x1AA).await? == (R1_ILLEGAL_COMMAND | R1_IDLE_STATE)
+            {
                 self.card_type = CardType::SD1;
                 break;
             }
@@ -204,7 +225,9 @@ where
                 self.card_type = CardType::SD2;
                 break;
             }
-            delay.delay(Error::TimeoutCommand(CMD8))?;
+            timeout
+                .delay(delay, 10, Error::TimeoutCommand(CMD8))
+                .await?;
         }
 
         let arg = match self.card_type {
@@ -212,13 +235,15 @@ where
             CardType::SD2 | CardType::SDHC => 0x4000_0000,
         };
 
-        let mut delay = Delay::new();
-        while self.card_acmd(ACMD41, arg).await? != R1_READY_STATE {
-            delay.delay(Error::TimeoutACommand(ACMD41))?;
+        let mut timeout = Delay::new();
+        while self.card_acmd(delay, ACMD41, arg).await? != R1_READY_STATE {
+            timeout
+                .delay(delay, 10, Error::TimeoutACommand(ACMD41))
+                .await?;
         }
 
         if self.card_type == CardType::SD2 {
-            if self.card_command(CMD58, 0).await? != 0 {
+            if self.card_command(delay, CMD58, 0).await? != 0 {
                 return Err(Error::Cmd58Error);
             }
             if (self.receive().await? & 0xC0) == 0xC0 {
@@ -239,14 +264,24 @@ where
     }
 
     /// Perform an application-specific command.
-    async fn card_acmd(&self, command: u8, arg: u32) -> Result<u8, Error> {
-        self.card_command(CMD55, 0).await?;
-        self.card_command(command, arg).await
+    async fn card_acmd<D: embassy_traits::delay::Delay>(
+        &self,
+        delay: &mut D,
+        command: u8,
+        arg: u32,
+    ) -> Result<u8, Error> {
+        self.card_command(delay, CMD55, 0).await?;
+        self.card_command(delay, command, arg).await
     }
 
     /// Perform a command.
-    async fn card_command(&self, command: u8, arg: u32) -> Result<u8, Error> {
-        self.wait_not_busy().await?;
+    async fn card_command<D: embassy_traits::delay::Delay>(
+        &self,
+        delay: &mut D,
+        command: u8,
+        arg: u32,
+    ) -> Result<u8, Error> {
+        self.wait_not_busy(delay).await?;
         let mut buf = [
             0x40 | command,
             (arg >> 24) as u8,
@@ -299,14 +334,17 @@ where
 
     /// Spin until the card returns 0xFF, or we spin too many times and
     /// timeout.
-    async fn wait_not_busy(&self) -> Result<(), Error> {
-        let mut delay = Delay::new();
+    async fn wait_not_busy<D>(&self, delay: &mut D) -> Result<(), Error>
+    where
+        D: embassy_traits::delay::Delay,
+    {
+        let mut timeout = Delay::new();
         loop {
             let s = self.receive().await?;
             if s == 0xFF {
                 break;
             }
-            delay.delay(Error::TimeoutWaitNotBusy)?;
+            timeout.delay(delay, 10, Error::TimeoutWaitNotBusy).await?;
         }
         Ok(())
     }
@@ -326,9 +364,12 @@ where
     }
 
     /// Return the usable size of this SD card in bytes.
-    pub async fn card_size_bytes(&self) -> Result<u64, Error> {
+    pub async fn card_size_bytes<D: embassy_traits::delay::Delay>(
+        &self,
+        delay: &mut D,
+    ) -> Result<u64, Error> {
         self.cs_low()?;
-        let csd = self.read_csd().await?;
+        let csd = self.read_csd(delay).await?;
         let result = match csd {
             Csd::V1(ref contents) => Ok(contents.card_capacity_bytes()),
             Csd::V2(ref contents) => Ok(contents.card_capacity_bytes()),
@@ -343,9 +384,12 @@ where
     }
 
     /// Can this card erase single blocks?
-    pub async fn erase_single_block_enabled(&self) -> Result<bool, Error> {
+    pub async fn erase_single_block_enabled<D: embassy_traits::delay::Delay>(
+        &self,
+        delay: &mut D,
+    ) -> Result<bool, Error> {
         self.cs_low()?;
-        let csd = self.read_csd().await?;
+        let csd = self.read_csd(delay).await?;
         let result = match csd {
             Csd::V1(ref contents) => Ok(contents.erase_single_block_enabled()),
             Csd::V2(ref contents) => Ok(contents.erase_single_block_enabled()),
@@ -355,22 +399,22 @@ where
     }
 
     /// Read the 'card specific data' block.
-    async fn read_csd(&self) -> Result<Csd, Error> {
+    async fn read_csd<D: embassy_traits::delay::Delay>(&self, delay: &mut D) -> Result<Csd, Error> {
         match self.card_type {
             CardType::SD1 => {
                 let mut csd = CsdV1::new();
-                if self.card_command(CMD9, 0).await? != 0 {
+                if self.card_command(delay, CMD9, 0).await? != 0 {
                     return Err(Error::RegisterReadError);
                 }
-                self.read_data(&mut csd.data).await?;
+                self.read_data(delay, &mut csd.data).await?;
                 Ok(Csd::V1(csd))
             }
             CardType::SD2 | CardType::SDHC => {
                 let mut csd = CsdV2::new();
-                if self.card_command(CMD9, 0).await? != 0 {
+                if self.card_command(delay, CMD9, 0).await? != 0 {
                     return Err(Error::RegisterReadError);
                 }
-                self.read_data(&mut csd.data).await?;
+                self.read_data(delay, &mut csd.data).await?;
                 Ok(Csd::V2(csd))
             }
         }
@@ -378,15 +422,18 @@ where
 
     /// Read an arbitrary number of bytes from the card. Always fills the
     /// given buffer, so make sure it's the right size.
-    async fn read_data(&self, buffer: &mut [u8]) -> Result<(), Error> {
+    async fn read_data<D>(&self, delay: &mut D, buffer: &mut [u8]) -> Result<(), Error>
+    where
+        D: embassy_traits::delay::Delay,
+    {
         // Get first non-FF byte.
-        let mut delay = Delay::new();
+        let mut timeout = Delay::new();
         let status = loop {
             let s = self.receive().await?;
             if s != 0xFF {
                 break s;
             }
-            delay.delay(Error::TimeoutReadBuffer)?;
+            timeout.delay(delay, 10, Error::TimeoutReadBuffer).await?;
         };
         if status != DATA_START_BLOCK {
             return Err(Error::ReadError);
@@ -426,8 +473,9 @@ where
     }
 
     /// Read one or more blocks, starting at the given block index.
-    pub async fn read(
+    pub async fn read<D: embassy_traits::delay::Delay>(
         &self,
+        delay: &mut D,
         blocks: &mut [Block],
         start_block_idx: BlockIdx,
         _reason: &str,
@@ -440,23 +488,28 @@ where
 
         if blocks.len() == 1 {
             // Start a single-block read
-            self.card_command(CMD17, start_idx).await?;
-            self.read_data(&mut blocks[0].contents).await?;
+            self.card_command(delay, CMD17, start_idx).await?;
+            self.read_data(delay, &mut blocks[0].contents).await?;
         } else {
             // Start a multi-block read
-            self.card_command(CMD18, start_idx).await?;
+            self.card_command(delay, CMD18, start_idx).await?;
             for block in blocks.iter_mut() {
-                self.read_data(&mut block.contents).await?;
+                self.read_data(delay, &mut block.contents).await?;
             }
             // Stop the read
-            self.card_command(CMD12, 0).await?;
+            self.card_command(delay, CMD12, 0).await?;
         }
         self.cs_high()?;
         Ok(())
     }
 
     /// Write one or more blocks, starting at the given block index.
-    pub async fn write(&self, blocks: &[Block], start_block_idx: BlockIdx) -> Result<(), Error> {
+    pub async fn write<D: embassy_traits::delay::Delay>(
+        &self,
+        delay: &mut D,
+        blocks: &[Block],
+        start_block_idx: BlockIdx,
+    ) -> Result<(), Error> {
         let start_idx = match self.card_type {
             CardType::SD1 | CardType::SD2 => start_block_idx.0 * 512,
             CardType::SDHC => start_block_idx.0,
@@ -465,11 +518,11 @@ where
 
         if blocks.len() == 1 {
             // Start a single-block write
-            self.card_command(CMD24, start_idx).await?;
+            self.card_command(delay, CMD24, start_idx).await?;
             self.write_data(DATA_START_BLOCK, &blocks[0].contents)
                 .await?;
-            self.wait_not_busy().await?;
-            if self.card_command(CMD13, 0).await? != 0x00 {
+            self.wait_not_busy(delay).await?;
+            if self.card_command(delay, CMD13, 0).await? != 0x00 {
                 return Err(Error::WriteError);
             }
             if self.receive().await? != 0x00 {
@@ -477,14 +530,14 @@ where
             }
         } else {
             // Start a multi-block write
-            self.card_command(CMD25, start_idx).await?;
+            self.card_command(delay, CMD25, start_idx).await?;
             for block in blocks.iter() {
-                self.wait_not_busy().await?;
+                self.wait_not_busy(delay).await?;
                 self.write_data(WRITE_MULTIPLE_TOKEN, &block.contents)
                     .await?;
             }
             // Stop the write
-            self.wait_not_busy().await?;
+            self.wait_not_busy(delay).await?;
             self.send(STOP_TRAN_TOKEN).await?;
         }
 
@@ -493,8 +546,11 @@ where
     }
 
     /// Determine how many blocks this device can hold.
-    async fn num_blocks(&self) -> Result<BlockCount, Error> {
-        let num_bytes = self.card_size_bytes().await?;
+    async fn num_blocks<D: embassy_traits::delay::Delay>(
+        &self,
+        delay: &mut D,
+    ) -> Result<BlockCount, Error> {
+        let num_bytes = self.card_size_bytes(delay).await?;
         let num_blocks = (num_bytes / 512) as u32;
         Ok(BlockCount(num_blocks))
     }

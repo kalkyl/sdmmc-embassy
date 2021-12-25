@@ -1,9 +1,5 @@
-# Playground for Embassy-rs on nrf52840
-
-## Switch to nightly
-
-`$ rustup default nightly`
+# Async SDMMC SPI driver example on nrf52840
 
 ## Run example
 
-`$ DEFMT_LOG=info cargo rb blink`
+`$ DEFMT_LOG=info cargo rb mount`

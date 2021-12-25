@@ -273,8 +273,9 @@ where
     /// Record. We do not support GUID Partition Table disks. Nor do we
     /// support any concept of drive letters - that is for a higher layer to
     /// handle.
-    pub async fn get_volume(
+    pub async fn get_volume<D: embassy_traits::delay::Delay>(
         &mut self,
+        delay: &mut D,
         volume_idx: VolumeIdx,
     ) -> Result<Volume, Error<sdmmc::Error>> {
         const PARTITION1_START: usize = 446;
@@ -292,7 +293,7 @@ where
         let (part_type, lba_start, num_blocks) = {
             let mut blocks = [Block::new()];
             self.block_device
-                .read(&mut blocks, BlockIdx(0), "read_mbr")
+                .read(delay, &mut blocks, BlockIdx(0), "read_mbr")
                 .await
                 .map_err(Error::DeviceError)?;
             let block = &blocks[0];
@@ -339,7 +340,7 @@ where
             | PARTITION_ID_FAT32_LBA
             | PARTITION_ID_FAT16_LBA
             | PARTITION_ID_FAT16 => {
-                let volume = fat::parse_volume(self, lba_start, num_blocks).await?;
+                let volume = fat::parse_volume(delay, self, lba_start, num_blocks).await?;
                 Ok(Volume {
                     idx: volume_idx,
                     volume_type: volume,
@@ -384,12 +385,16 @@ where
     /// TODO: Work out how to prevent damage occuring to the file system while
     /// this directory handle is open. In particular, stop this directory
     /// being unlinked.
-    pub async fn open_dir(
+    pub async fn open_dir<D>(
         &mut self,
+        delay: &mut D,
         volume: &Volume,
         parent_dir: &Directory,
         name: &str,
-    ) -> Result<Directory, Error<sdmmc::Error>> {
+    ) -> Result<Directory, Error<sdmmc::Error>>
+    where
+        D: embassy_traits::delay::Delay,
+    {
         // Find a free open directory table row
         let mut open_dirs_row = None;
         for (i, d) in self.open_dirs.iter().enumerate() {
@@ -401,7 +406,10 @@ where
 
         // Open the directory
         let dir_entry = match &volume.volume_type {
-            VolumeType::Fat(fat) => fat.find_directory_entry(self, parent_dir, name).await?,
+            VolumeType::Fat(fat) => {
+                fat.find_directory_entry(delay, self, parent_dir, name)
+                    .await?
+            }
         };
 
         if !dir_entry.attributes.is_directory() {
@@ -436,35 +444,42 @@ where
     }
 
     /// Look in a directory for a named file.
-    pub async fn find_directory_entry(
+    pub async fn find_directory_entry<D>(
         &mut self,
+        delay: &mut D,
         volume: &Volume,
         dir: &Directory,
         name: &str,
-    ) -> Result<DirEntry, Error<sdmmc::Error>> {
+    ) -> Result<DirEntry, Error<sdmmc::Error>>
+    where
+        D: embassy_traits::delay::Delay,
+    {
         match &volume.volume_type {
-            VolumeType::Fat(fat) => fat.find_directory_entry(self, dir, name).await,
+            VolumeType::Fat(fat) => fat.find_directory_entry(delay, self, dir, name).await,
         }
     }
 
     /// Call a callback function for each directory entry in a directory.
-    pub async fn iterate_dir<F>(
+    pub async fn iterate_dir<F, D>(
         &mut self,
+        delay: &mut D,
         volume: &Volume,
         dir: &Directory,
         func: F,
     ) -> Result<(), Error<sdmmc::Error>>
     where
         F: FnMut(&DirEntry),
+        D: embassy_traits::delay::Delay,
     {
         match &volume.volume_type {
-            VolumeType::Fat(fat) => fat.iterate_dir(self, dir, func).await,
+            VolumeType::Fat(fat) => fat.iterate_dir(delay, self, dir, func).await,
         }
     }
 
     /// Open a file from DirEntry. This is obtained by calling iterate_dir. A file can only be opened once.
-    pub async fn open_dir_entry(
+    pub async fn open_dir_entry<D: embassy_traits::delay::Delay>(
         &mut self,
+        delay: &mut D,
         volume: &mut Volume,
         dir_entry: DirEntry,
         mode: Mode,
@@ -517,7 +532,7 @@ where
                 };
                 match &mut volume.volume_type {
                     VolumeType::Fat(fat) => {
-                        fat.truncate_cluster_chain(self, file.starting_cluster)
+                        fat.truncate_cluster_chain(delay, self, file.starting_cluster)
                             .await?
                     }
                 };
@@ -526,7 +541,8 @@ where
                 match &volume.volume_type {
                     VolumeType::Fat(fat) => {
                         let fat_type = fat.get_fat_type();
-                        self.write_entry_to_disk(fat_type, &file.entry).await?;
+                        self.write_entry_to_disk(delay, fat_type, &file.entry)
+                            .await?;
                     }
                 };
 
@@ -540,8 +556,9 @@ where
     }
 
     /// Open a file with the given full path. A file can only be opened once.
-    pub async fn open_file_in_dir(
+    pub async fn open_file_in_dir<D: embassy_traits::delay::Delay>(
         &mut self,
+        delay: &mut D,
         volume: &mut Volume,
         dir: &Directory,
         name: &str,
@@ -549,7 +566,7 @@ where
     ) -> Result<File, Error<sdmmc::Error>> {
         let open_files_row = self.get_open_files_row()?;
         let dir_entry = match &volume.volume_type {
-            VolumeType::Fat(fat) => fat.find_directory_entry(self, dir, name),
+            VolumeType::Fat(fat) => fat.find_directory_entry(delay, self, dir, name),
         };
 
         let dir_entry = match dir_entry.await {
@@ -576,7 +593,7 @@ where
                 let att = Attributes::create_from_fat(0);
                 let entry = match &mut volume.volume_type {
                     VolumeType::Fat(fat) => {
-                        fat.write_new_directory_entry(self, dir, file_name, att)
+                        fat.write_new_directory_entry(delay, self, dir, file_name, att)
                             .await?
                     }
                 };
@@ -596,7 +613,7 @@ where
             _ => {
                 // Safe to unwrap, since we actually have an entry if we got here
                 let dir_entry = dir_entry.unwrap();
-                self.open_dir_entry(volume, dir_entry, mode).await
+                self.open_dir_entry(delay, volume, dir_entry, mode).await
             }
         }
     }
@@ -614,18 +631,22 @@ where
     }
 
     /// Delete a closed file with the given full path, if exists.
-    pub async fn delete_file_in_dir(
+    pub async fn delete_file_in_dir<D>(
         &mut self,
+        delay: &mut D,
         volume: &Volume,
         dir: &Directory,
         name: &str,
-    ) -> Result<(), Error<sdmmc::Error>> {
+    ) -> Result<(), Error<sdmmc::Error>>
+    where
+        D: embassy_traits::delay::Delay,
+    {
         debug!(
             "delete_file(volume={:?}, dir={:?}, filename={:?}",
             volume, dir, name
         );
         let dir_entry = match &volume.volume_type {
-            VolumeType::Fat(fat) => fat.find_directory_entry(self, dir, name).await,
+            VolumeType::Fat(fat) => fat.find_directory_entry(delay, self, dir, name).await,
         }?;
 
         if dir_entry.attributes.is_directory() {
@@ -640,13 +661,16 @@ where
         }
 
         match &volume.volume_type {
-            VolumeType::Fat(fat) => return fat.delete_directory_entry(self, dir, name).await,
+            VolumeType::Fat(fat) => {
+                return fat.delete_directory_entry(delay, self, dir, name).await
+            }
         };
     }
 
     /// Read from an open file.
-    pub async fn read(
+    pub async fn read<D: embassy_traits::delay::Delay>(
         &mut self,
+        delay: &mut D,
         volume: &Volume,
         file: &mut File,
         buffer: &mut [u8],
@@ -658,11 +682,16 @@ where
         let mut read = 0;
         while space > 0 && !file.eof() {
             let (block_idx, block_offset, block_avail) = self
-                .find_data_on_disk(volume, &mut file.current_cluster, file.current_offset)
+                .find_data_on_disk(
+                    delay,
+                    volume,
+                    &mut file.current_cluster,
+                    file.current_offset,
+                )
                 .await?;
             let mut blocks = [Block::new()];
             self.block_device
-                .read(&mut blocks, block_idx, "read")
+                .read(delay, &mut blocks, block_idx, "read")
                 .await
                 .map_err(Error::DeviceError)?;
             let block = &blocks[0];
@@ -678,8 +707,9 @@ where
     }
 
     /// Write to a open file.
-    pub async fn write(
+    pub async fn write<D: embassy_traits::delay::Delay>(
         &mut self,
+        delay: &mut D,
         volume: &mut Volume,
         file: &mut File,
         buffer: &[u8],
@@ -694,7 +724,7 @@ where
         if file.starting_cluster.0 < RESERVED_ENTRIES {
             // file doesn't have a valid allocated cluster (possible zero-length file), allocate one
             file.starting_cluster = match &mut volume.volume_type {
-                VolumeType::Fat(fat) => fat.alloc_cluster(self, None, false).await?,
+                VolumeType::Fat(fat) => fat.alloc_cluster(delay, self, None, false).await?,
             };
             file.entry.cluster = file.starting_cluster;
             debug!("Alloc first cluster {:?}", file.starting_cluster);
@@ -715,7 +745,7 @@ where
                 written, bytes_to_write, current_cluster
             );
             let (block_idx, block_offset, block_avail) = match self
-                .find_data_on_disk(volume, &mut current_cluster, file.current_offset)
+                .find_data_on_disk(delay, volume, &mut current_cluster, file.current_offset)
                 .await
             {
                 Ok(vars) => {
@@ -730,7 +760,7 @@ where
                     match &mut volume.volume_type {
                         VolumeType::Fat(ref mut fat) => {
                             if fat
-                                .alloc_cluster(self, Some(current_cluster.1), false)
+                                .alloc_cluster(delay, self, Some(current_cluster.1), false)
                                 .await
                                 .is_err()
                             {
@@ -739,6 +769,7 @@ where
                             debug!("Allocated new FAT cluster, finding offsets...");
                             let new_offset = self
                                 .find_data_on_disk(
+                                    delay,
                                     volume,
                                     &mut current_cluster,
                                     file.current_offset,
@@ -757,7 +788,7 @@ where
             if block_offset != 0 {
                 debug!("Partial block write");
                 self.block_device
-                    .read(&mut blocks, block_idx, "read")
+                    .read(delay, &mut blocks, block_idx, "read")
                     .await
                     .map_err(Error::DeviceError)?;
             }
@@ -766,7 +797,7 @@ where
                 .copy_from_slice(&buffer[written..written + to_copy]);
             debug!("Writing block {:?}", block_idx);
             self.block_device
-                .write(&blocks, block_idx)
+                .write(delay, &blocks, block_idx)
                 .await
                 .map_err(Error::DeviceError)?;
             written += to_copy;
@@ -780,9 +811,9 @@ where
             debug!("Updating FAT info sector");
             match &mut volume.volume_type {
                 VolumeType::Fat(fat) => {
-                    fat.update_info_sector(self).await?;
+                    fat.update_info_sector(delay, self).await?;
                     debug!("Updating dir entry");
-                    self.write_entry_to_disk(fat.get_fat_type(), &file.entry)
+                    self.write_entry_to_disk(delay, fat.get_fat_type(), &file.entry)
                         .await?;
                 }
             }
@@ -824,12 +855,16 @@ where
     /// This function turns `desired_offset` into an appropriate block to be
     /// read. It either calculates this based on the start of the file, or
     /// from the last cluster we read - whichever is better.
-    async fn find_data_on_disk(
+    async fn find_data_on_disk<D>(
         &mut self,
+        delay: &mut D,
         volume: &Volume,
         start: &mut (u32, Cluster),
         desired_offset: u32,
-    ) -> Result<(BlockIdx, usize, usize), Error<sdmmc::Error>> {
+    ) -> Result<(BlockIdx, usize, usize), Error<sdmmc::Error>>
+    where
+        D: embassy_traits::delay::Delay,
+    {
         let bytes_per_cluster = match &volume.volume_type {
             VolumeType::Fat(fat) => fat.bytes_per_cluster(),
         };
@@ -838,7 +873,7 @@ where
         let num_clusters = offset_from_cluster / bytes_per_cluster;
         for _ in 0..num_clusters {
             start.1 = match &volume.volume_type {
-                VolumeType::Fat(fat) => fat.next_cluster(self, start.1).await?,
+                VolumeType::Fat(fat) => fat.next_cluster(delay, self, start.1).await?,
             };
             start.0 += bytes_per_cluster;
         }
@@ -855,14 +890,15 @@ where
     }
 
     /// Writes a Directory Entry to the disk
-    async fn write_entry_to_disk(
+    async fn write_entry_to_disk<D: embassy_traits::delay::Delay>(
         &mut self,
+        delay: &mut D,
         fat_type: fat::FatType,
         entry: &DirEntry,
     ) -> Result<(), Error<sdmmc::Error>> {
         let mut blocks = [Block::new()];
         self.block_device
-            .read(&mut blocks, entry.entry_block, "read")
+            .read(delay, &mut blocks, entry.entry_block, "read")
             .await
             .map_err(Error::DeviceError)?;
         let block = &mut blocks[0];
@@ -871,7 +907,7 @@ where
         block[start..start + 32].copy_from_slice(&entry.serialize(fat_type)[..]);
 
         self.block_device
-            .write(&blocks, entry.entry_block)
+            .write(delay, &blocks, entry.entry_block)
             .await
             .map_err(Error::DeviceError)?;
         Ok(())

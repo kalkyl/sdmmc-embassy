@@ -12,6 +12,7 @@ use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::Peripherals;
 use embassy_nrf::{interrupt, spim};
 use sdmmc_embassy::{TimeSource, Timestamp, VolumeIdx};
+use embassy::time::Delay;
 
 pub struct SdMmcClock;
 
@@ -38,10 +39,10 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     let spim = spim::Spim::new(p.SPI3, irq, p.P0_08, p.P0_06, p.P0_04, config);
     let sdmmc_spi = sdmmc_embassy::SdMmcSpi::new(spim, sdmmc_cs);
 
-    if let Ok(spi) = sdmmc_spi.acquire().await {
+    if let Ok(spi) = sdmmc_spi.acquire(&mut Delay).await {
         let mut sdmmc_controller = sdmmc_embassy::Controller::new(spi, SdMmcClock);
 
-        match sdmmc_controller.device().card_size_bytes().await {
+        match sdmmc_controller.device().card_size_bytes(&mut Delay).await {
             Ok(size) => info!("Card size {}\r", size),
             Err(e) => {
                 let mut err = heapless::String::<64>::new();
@@ -50,12 +51,12 @@ async fn main(_spawner: Spawner, p: Peripherals) {
             }
         }
 
-        match sdmmc_controller.get_volume(VolumeIdx(0)).await {
+        match sdmmc_controller.get_volume(&mut Delay, VolumeIdx(0)).await {
             Ok(volume) => {
                 let root_dir = sdmmc_controller.open_root_dir(&volume).unwrap();
                 info!("Listing root directory:\r");
                 sdmmc_controller
-                    .iterate_dir(&volume, &root_dir, |x| {
+                    .iterate_dir(&mut Delay, &volume, &root_dir, |x| {
                         let mut name = heapless::String::<64>::new();
                         core::write!(name, "{:13}", x.name).unwrap();
                         info!("{}", name.as_str());
