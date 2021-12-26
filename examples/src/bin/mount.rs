@@ -38,7 +38,7 @@ async fn main(_spawner: Spawner, p: Peripherals) {
                     info!("{}", core::str::from_utf8(x.name.base_name()).unwrap());
                 })
                 .await
-                .ok();
+                .unwrap();
             info!("End of listing");
         }
         _ => error!("Error listing directory"),
