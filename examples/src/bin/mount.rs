@@ -5,7 +5,6 @@
 
 use nrf_embassy as _; // global logger + panicking-behavior + memory layout
 
-use core::fmt::Write as FmtWrite;
 use defmt::*;
 use embassy::executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
@@ -27,11 +26,7 @@ async fn main(_spawner: Spawner, p: Peripherals) {
 
     match sdmmc_controller.device().card_size_bytes().await {
         Ok(size) => info!("Card size {}", size),
-        Err(e) => {
-            let mut err = heapless::String::<32>::new();
-            core::write!(err, "{:?}", e).unwrap();
-            error!("{}", err.as_str());
-        }
+        _ => error!("Error getting card size"),
     }
 
     match sdmmc_controller.get_volume(VolumeIdx(0)).await {
@@ -46,11 +41,7 @@ async fn main(_spawner: Spawner, p: Peripherals) {
                 .ok();
             info!("End of listing");
         }
-        Err(e) => {
-            let mut err = heapless::String::<32>::new();
-            core::write!(err, "{:?}", e).unwrap();
-            error!("{}", err.as_str());
-        }
+        _ => error!("Error listing directory"),
     }
 
     loop {}
