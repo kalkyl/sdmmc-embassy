@@ -3,20 +3,6 @@
 //! Implements generic file system components. These should be applicable to
 //! most (if not all) supported filesystems.
 
-// ****************************************************************************
-//
-// Imports
-//
-// ****************************************************************************
-
-// None
-
-// ****************************************************************************
-//
-// Public Types
-//
-// ****************************************************************************
-
 use core::convert::TryFrom;
 
 use crate::blockdevice::BlockIdx;
@@ -106,6 +92,7 @@ pub struct File {
 }
 
 /// Represents an open directory on disk.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Directory {
     /// The starting point of the directory listing.
@@ -712,20 +699,6 @@ impl Directory {}
 
 impl FilenameError {}
 
-// ****************************************************************************
-//
-// Private Functions / Impl for Priate Types
-//
-// ****************************************************************************
-
-// None
-
-// ****************************************************************************
-//
-// Unit Tests
-//
-// ****************************************************************************
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -806,9 +779,3 @@ mod test {
         assert!(ShortFileName::create_from_str("12345678.ABCD").is_err());
     }
 }
-
-// ****************************************************************************
-//
-// End Of File
-//
-// ****************************************************************************

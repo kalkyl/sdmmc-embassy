@@ -9,9 +9,52 @@ use core::fmt::Write as FmtWrite;
 use defmt::*;
 use embassy::executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
-use embassy_nrf::Peripherals;
-use embassy_nrf::{interrupt, spim};
+use embassy_nrf::{interrupt, spim, Peripherals};
 use sdmmc_embassy::{TimeSource, Timestamp, VolumeIdx};
+
+#[embassy::main]
+async fn main(_spawner: Spawner, p: Peripherals) {
+    let mut config = spim::Config::default();
+    config.frequency = spim::Frequency::K125;
+    let irq = interrupt::take!(SPIM3);
+    let sdmmc_cs = Output::new(p.P0_26, Level::High, OutputDrive::Standard);
+    let spim = spim::Spim::new(p.SPI3, irq, p.P0_08, p.P0_06, p.P0_04, config);
+
+    let mut sdmmc_spi = sdmmc_embassy::SdMmcSpi::new(spim, sdmmc_cs);
+    sdmmc_spi.init().await.unwrap();
+
+    let mut sdmmc_controller = sdmmc_embassy::Controller::new(sdmmc_spi, SdMmcClock);
+
+    match sdmmc_controller.device().card_size_bytes().await {
+        Ok(size) => info!("Card size {}", size),
+        Err(e) => {
+            let mut err = heapless::String::<32>::new();
+            core::write!(err, "{:?}", e).unwrap();
+            error!("{}", err.as_str());
+        }
+    }
+
+    match sdmmc_controller.get_volume(VolumeIdx(0)).await {
+        Ok(volume) => {
+            let root_dir = sdmmc_controller.open_root_dir(&volume).unwrap();
+            info!("Listing root directory:");
+            sdmmc_controller
+                .iterate_dir(&volume, &root_dir, |x| {
+                    info!("{}", core::str::from_utf8(x.name.base_name()).unwrap());
+                })
+                .await
+                .ok();
+            info!("End of listing");
+        }
+        Err(e) => {
+            let mut err = heapless::String::<32>::new();
+            core::write!(err, "{:?}", e).unwrap();
+            error!("{}", err.as_str());
+        }
+    }
+
+    loop {}
+}
 
 pub struct SdMmcClock;
 
@@ -26,51 +69,4 @@ impl TimeSource for SdMmcClock {
             seconds: 0,
         }
     }
-}
-
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
-    let mut config = spim::Config::default();
-    config.frequency = spim::Frequency::K125;
-
-    let irq = interrupt::take!(SPIM3);
-    let sdmmc_cs = Output::new(p.P0_26, Level::High, OutputDrive::Standard);
-    let spim = spim::Spim::new(p.SPI3, irq, p.P0_08, p.P0_06, p.P0_04, config);
-    let sdmmc_spi = sdmmc_embassy::SdMmcSpi::new(spim, sdmmc_cs);
-
-    if let Ok(spi) = sdmmc_spi.acquire().await {
-        let mut sdmmc_controller = sdmmc_embassy::Controller::new(spi, SdMmcClock);
-
-        match sdmmc_controller.device().card_size_bytes().await {
-            Ok(size) => info!("Card size {}\r", size),
-            Err(e) => {
-                let mut err = heapless::String::<64>::new();
-                core::write!(err, "{:?}", e).unwrap();
-                info!("{}", err.as_str());
-            }
-        }
-
-        match sdmmc_controller.get_volume(VolumeIdx(0)).await {
-            Ok(volume) => {
-                let root_dir = sdmmc_controller.open_root_dir(&volume).unwrap();
-                info!("Listing root directory:\r");
-                sdmmc_controller
-                    .iterate_dir(&volume, &root_dir, |x| {
-                        let mut name = heapless::String::<64>::new();
-                        core::write!(name, "{:13}", x.name).unwrap();
-                        info!("{}", name.as_str());
-                    })
-                    .await
-                    .unwrap();
-                info!("End of listing\r");
-            }
-            Err(e) => {
-                let mut error = heapless::String::<64>::new();
-                core::write!(error, "{:?}", e).unwrap();
-                info!("{}", error.as_str());
-            }
-        }
-    }
-
-    loop {}
 }

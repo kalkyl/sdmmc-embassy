@@ -106,14 +106,14 @@ impl Delay {
 
 /// Options for acquiring the card.
 #[derive(Debug)]
-pub struct AcquireOpts {
+pub struct InitOpts {
     /// Some cards don't support CRC mode. At least a 512MiB Transcend one.
     pub require_crc: bool,
 }
 
-impl Default for AcquireOpts {
+impl Default for InitOpts {
     fn default() -> Self {
-        AcquireOpts { require_crc: true }
+        Self { require_crc: true }
     }
 }
 
@@ -145,15 +145,12 @@ where
     }
 
     /// Initializes the card into a known state
-    pub async fn acquire(self) -> Result<SdMmcSpi<SPI, CS>, Error> {
-        self.acquire_with_opts(Default::default()).await
+    pub async fn init(&mut self) -> Result<(), Error> {
+        self.init_with_opts(Default::default()).await
     }
 
     /// Initializes the card into a known state
-    pub async fn acquire_with_opts(
-        mut self,
-        options: AcquireOpts,
-    ) -> Result<SdMmcSpi<SPI, CS>, Error> {
+    pub async fn init_with_opts(&mut self, options: InitOpts) -> Result<(), Error> {
         // Assume it hasn't worked
         self.state = State::Error;
         // Supply minimum of 74 clock cycles without CS asserted.
@@ -235,7 +232,7 @@ where
         // let result = f(self).await;
         self.cs_high()?;
         let _ = self.receive();
-        Ok(self)
+        Ok(())
     }
 
     /// Perform an application-specific command.
@@ -493,12 +490,19 @@ where
     }
 
     /// Determine how many blocks this device can hold.
-    async fn num_blocks(&self) -> Result<BlockCount, Error> {
+    pub async fn num_blocks(&self) -> Result<BlockCount, Error> {
         let num_bytes = self.card_size_bytes().await?;
         let num_blocks = (num_bytes / 512) as u32;
         Ok(BlockCount(num_blocks))
     }
+}
 
+impl<SPI, CS> Drop for SdMmcSpi<SPI, CS>
+where
+    SPI: embassy_traits::spi::FullDuplex<u8> + embassy_traits::spi::Spi<u8>,
+    CS: embedded_hal::digital::v2::OutputPin,
+    <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
+{
     fn drop(&mut self) {
         self.deinit()
     }
