@@ -568,7 +568,7 @@ impl FatVolume {
     /// Look in the FAT to see which cluster comes next.
     pub(crate) async fn next_cluster<T, SPI, CS>(
         &self,
-        controller: &Controller<T, SPI, CS>,
+        controller: &mut Controller<T, SPI, CS>,
         cluster: Cluster,
     ) -> Result<Cluster, Error<sdmmc::Error>>
     where
@@ -822,7 +822,7 @@ impl FatVolume {
     /// Useful for performing directory listings.
     pub(crate) async fn iterate_dir<T, F, SPI, CS>(
         &self,
-        controller: &Controller<T, SPI, CS>,
+        controller: &mut Controller<T, SPI, CS>,
         dir: &Directory,
         mut func: F,
     ) -> Result<(), Error<sdmmc::Error>>

@@ -15,7 +15,7 @@ use sdmmc_embassy::{TimeSource, Timestamp, VolumeIdx};
 #[embassy::main]
 async fn main(_spawner: Spawner, p: Peripherals) {
     let mut config = spim::Config::default();
-    config.frequency = spim::Frequency::K125;
+    config.frequency = spim::Frequency::M2;
     let irq = interrupt::take!(SPIM3);
     let sdmmc_cs = Output::new(p.P0_26, Level::High, OutputDrive::Standard);
     let spim = spim::Spim::new(p.SPI3, irq, p.P0_08, p.P0_06, p.P0_04, config);

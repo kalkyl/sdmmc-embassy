@@ -7,7 +7,6 @@
 
 use super::sdmmc_proto::*;
 use super::{Block, BlockCount, BlockIdx};
-use core::cell::RefCell;
 
 const DEFAULT_DELAY_COUNT: u32 = 32_000;
 
@@ -21,8 +20,8 @@ where
     CS: embedded_hal::digital::v2::OutputPin,
     <SPI as embassy_traits::spi::Spi<u8>>::Error: core::fmt::Debug,
 {
-    spi: RefCell<SPI>,
-    cs: RefCell<CS>,
+    spi: SPI,
+    cs: CS,
     card_type: CardType,
     state: State,
 }
@@ -126,22 +125,19 @@ where
     /// Create a new SD/MMC controller using a raw SPI interface.
     pub fn new(spi: SPI, cs: CS) -> SdMmcSpi<SPI, CS> {
         SdMmcSpi {
-            spi: RefCell::new(spi),
-            cs: RefCell::new(cs),
+            spi,
+            cs,
             card_type: CardType::SD1,
             state: State::NoInit,
         }
     }
 
-    fn cs_high(&self) -> Result<(), Error> {
-        self.cs
-            .borrow_mut()
-            .set_high()
-            .map_err(|_| Error::GpioError)
+    fn cs_high(&mut self) -> Result<(), Error> {
+        self.cs.set_high().map_err(|_| Error::GpioError)
     }
 
-    fn cs_low(&self) -> Result<(), Error> {
-        self.cs.borrow_mut().set_low().map_err(|_| Error::GpioError)
+    fn cs_low(&mut self) -> Result<(), Error> {
+        self.cs.set_low().map_err(|_| Error::GpioError)
     }
 
     /// Initializes the card into a known state
@@ -236,13 +232,13 @@ where
     }
 
     /// Perform an application-specific command.
-    async fn card_acmd(&self, command: u8, arg: u32) -> Result<u8, Error> {
+    async fn card_acmd(&mut self, command: u8, arg: u32) -> Result<u8, Error> {
         self.card_command(CMD55, 0).await?;
         self.card_command(command, arg).await
     }
 
     /// Perform a command.
-    async fn card_command(&self, command: u8, arg: u32) -> Result<u8, Error> {
+    async fn card_command(&mut self, command: u8, arg: u32) -> Result<u8, Error> {
         self.wait_not_busy().await?;
         let mut buf = [
             0x40 | command,
@@ -274,21 +270,21 @@ where
     }
 
     /// Receive a byte from the SD card by clocking in an 0xFF byte.
-    async fn receive(&self) -> Result<u8, Error> {
+    async fn receive(&mut self) -> Result<u8, Error> {
         self.transfer(0xFF).await
     }
 
     /// Send a byte from the SD card.
-    async fn send(&self, out: u8) -> Result<(), Error> {
+    async fn send(&mut self, out: u8) -> Result<(), Error> {
         let _ = self.transfer(out).await?;
         Ok(())
     }
 
     /// Send one byte and receive one byte.
-    async fn transfer(&self, out: u8) -> Result<u8, Error> {
-        let mut spi = self.spi.borrow_mut();
+    async fn transfer(&mut self, out: u8) -> Result<u8, Error> {
         let mut buf = [0_u8];
-        spi.read_write(&mut buf, &[out])
+        self.spi
+            .read_write(&mut buf, &[out])
             .await
             .map_err(|_e| Error::Transport)?;
         Ok(buf[0])
@@ -296,7 +292,7 @@ where
 
     /// Spin until the card returns 0xFF, or we spin too many times and
     /// timeout.
-    async fn wait_not_busy(&self) -> Result<(), Error> {
+    async fn wait_not_busy(&mut self) -> Result<(), Error> {
         let mut delay = Delay::new();
         loop {
             let s = self.receive().await?;
@@ -310,8 +306,8 @@ where
 
     /// Get a temporary borrow on the underlying SPI device. Useful if you
     /// need to re-clock the SPI.
-    pub fn spi(&mut self) -> core::cell::RefMut<SPI> {
-        self.spi.borrow_mut()
+    pub fn spi(&mut self) -> &mut SPI {
+        &mut self.spi
     }
 
     /// Mark the card as unused.
@@ -323,7 +319,7 @@ where
     }
 
     /// Return the usable size of this SD card in bytes.
-    pub async fn card_size_bytes(&self) -> Result<u64, Error> {
+    pub async fn card_size_bytes(&mut self) -> Result<u64, Error> {
         self.cs_low()?;
         let csd = self.read_csd().await?;
         let result = match csd {
@@ -340,7 +336,7 @@ where
     }
 
     /// Can this card erase single blocks?
-    pub async fn erase_single_block_enabled(&self) -> Result<bool, Error> {
+    pub async fn erase_single_block_enabled(&mut self) -> Result<bool, Error> {
         self.cs_low()?;
         let csd = self.read_csd().await?;
         let result = match csd {
@@ -352,7 +348,7 @@ where
     }
 
     /// Read the 'card specific data' block.
-    async fn read_csd(&self) -> Result<Csd, Error> {
+    async fn read_csd(&mut self) -> Result<Csd, Error> {
         match self.card_type {
             CardType::SD1 => {
                 let mut csd = CsdV1::new();
@@ -375,7 +371,7 @@ where
 
     /// Read an arbitrary number of bytes from the card. Always fills the
     /// given buffer, so make sure it's the right size.
-    async fn read_data(&self, buffer: &mut [u8]) -> Result<(), Error> {
+    async fn read_data(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
         // Get first non-FF byte.
         let mut delay = Delay::new();
         let status = loop {
@@ -406,7 +402,7 @@ where
     }
 
     /// Write an arbitrary number of bytes to the card.
-    async fn write_data(&self, token: u8, buffer: &[u8]) -> Result<(), Error> {
+    async fn write_data(&mut self, token: u8, buffer: &[u8]) -> Result<(), Error> {
         let calc_crc = crc16(buffer);
         self.send(token).await?;
         for &b in buffer.iter() {
@@ -424,7 +420,7 @@ where
 
     /// Read one or more blocks, starting at the given block index.
     pub async fn read(
-        &self,
+        &mut self,
         blocks: &mut [Block],
         start_block_idx: BlockIdx,
         _reason: &str,
@@ -453,7 +449,11 @@ where
     }
 
     /// Write one or more blocks, starting at the given block index.
-    pub async fn write(&self, blocks: &[Block], start_block_idx: BlockIdx) -> Result<(), Error> {
+    pub async fn write(
+        &mut self,
+        blocks: &[Block],
+        start_block_idx: BlockIdx,
+    ) -> Result<(), Error> {
         let start_idx = match self.card_type {
             CardType::SD1 | CardType::SD2 => start_block_idx.0 * 512,
             CardType::SDHC => start_block_idx.0,
@@ -490,7 +490,7 @@ where
     }
 
     /// Determine how many blocks this device can hold.
-    pub async fn num_blocks(&self) -> Result<BlockCount, Error> {
+    pub async fn num_blocks(&mut self) -> Result<BlockCount, Error> {
         let num_bytes = self.card_size_bytes().await?;
         let num_blocks = (num_bytes / 512) as u32;
         Ok(BlockCount(num_blocks))
